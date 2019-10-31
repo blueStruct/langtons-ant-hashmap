@@ -1,314 +1,300 @@
 use self::Color::*;
 use self::Dir::*;
-use self::Quad::*;
+use std::borrow::Borrow;
 
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+#[cfg(feature = "btree_map")]
+use std::collections::btree_map::{BTreeMap as Map, Entry::*};
+
+#[cfg(not(feature = "btree_map"))]
+use fnv::FnvHashMap as Map;
+#[cfg(not(feature = "btree_map"))]
+use std::collections::hash_map::Entry::*;
+
+use std::ops::Deref;
+use std::ops::{Index, IndexMut};
+use std::rc::Rc;
+use std::time::Instant;
 
 fn main() {
+    let n: f32 = std::env::args()
+        .nth(1)
+        .expect("need number of turns")
+        .parse()
+        .expect("not a number");
+
     let mut ant = Ant::new();
-    for _ in 1..10 {
-        ant.go()
+
+    let now = Instant::now();
+    for _ in 0..n as usize {
+        ant.do_one_turn();
+    }
+    let elapsed = now.elapsed();
+
+    println!("this took {} seconds", elapsed.as_secs());
+    println!("registry used: {}", ant.registry.keys().count(),);
+    println!("map used: {}", ant.map.keys().count(),);
+    println!("black tiles: {}", ant.count_black_tiles());
+}
+
+const GRID_SIZE: usize = 32;
+#[cfg(not(feature = "btree_map"))]
+const REGISTRY_CAPACITY: usize = 512;
+#[cfg(not(feature = "btree_map"))]
+const MAP_CAPACITY: usize = 2e5 as usize;
+const LAST_ELEM: usize = last_elem(GRID_SIZE);
+const fn last_elem(a: usize) -> usize {
+    a - 1
+}
+
+type CGrid = Grid<Color>;
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
+struct Grid<T> {
+    h: usize,
+    w: usize,
+    inner: Vec<T>,
+}
+
+struct Ant {
+    registry: Map<CGrid, Rc<CGrid>>,
+    map: Map<(i64, i64), Rc<CGrid>>,
+    gx: i64,
+    gy: i64,
+    grid: CGrid,
+    lx: usize,
+    ly: usize,
+    dir: Dir,
+}
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug, PartialOrd, Ord)]
+enum Color {
+    White,
+    Black,
+}
+
+#[derive(Copy, Clone)]
+enum Dir {
+    Up,
+    Right,
+    Down,
+    Left,
+}
+
+impl Ant {
+    fn new() -> Self {
+        let empty_grid_rc = Rc::new(CGrid::new(GRID_SIZE, GRID_SIZE));
+
+        #[cfg(feature = "btree_map")]
+        let mut registry = Map::new();
+        #[cfg(feature = "btree_map")]
+        let mut map = Map::new();
+
+        #[cfg(not(feature = "btree_map"))]
+        let mut registry = Map::with_capacity_and_hasher(REGISTRY_CAPACITY, Default::default());
+        #[cfg(not(feature = "btree_map"))]
+        let mut map = Map::with_capacity_and_hasher(MAP_CAPACITY, Default::default());
+
+        registry.insert(CGrid::new(GRID_SIZE, GRID_SIZE), empty_grid_rc.clone());
+        map.insert((0, 0), empty_grid_rc);
+
+        Self {
+            registry,
+            map,
+            grid: CGrid::new(GRID_SIZE, GRID_SIZE),
+            dir: Up,
+            gx: 0,
+            gy: 0,
+            lx: GRID_SIZE / 2,
+            ly: GRID_SIZE / 2,
+        }
+    }
+
+    fn go_to_new_grid(&mut self, new_gx: i64, new_gy: i64) {
+        // store old grid
+        // if already in registry, fetch rc, store clone in map
+        if let Some(rc) = self.registry.get(&self.grid) {
+            self.map.insert((self.gx, self.gy), rc.clone());
+        // else make new rc and store in registry and map
+        } else {
+            let rc = Rc::new(self.grid.clone());
+            self.registry.insert(self.grid.clone(), rc.clone());
+            self.map.insert((self.gx, self.gy), rc);
+        }
+        // load new grid
+        self.grid = {
+            let entry = self.map.entry((new_gx, new_gy));
+            match entry {
+                // if already existing, get it
+                Occupied(x) => x.get().deref().borrow().clone(),
+                // else return empty grid
+                Vacant(_) => CGrid::new(GRID_SIZE, GRID_SIZE),
+            }
+        };
+    }
+
+    fn do_one_turn(&mut self) {
+        let tile = &mut self.grid[(self.ly, self.lx)];
+
+        // turn and flip color
+        match tile {
+            White => {
+                self.dir = Dir::from(self.dir as i8 + 1);
+                *tile = Black;
+            }
+            Black => {
+                self.dir = Dir::from(self.dir as i8 - 1);
+                *tile = White;
+            }
+        }
+
+        // move forward, possibly to new grid
+        match (self.dir, self.lx, self.ly) {
+            (Up, _, 0) => {
+                self.go_to_new_grid(self.gx, self.gy - 1);
+                self.gy -= 1;
+                self.ly = LAST_ELEM;
+            }
+            (Up, _, _) => {
+                self.ly -= 1;
+            }
+            (Down, _, LAST_ELEM) => {
+                self.go_to_new_grid(self.gx, self.gy + 1);
+                self.gy += 1;
+                self.ly = 0;
+            }
+            (Down, _, _) => {
+                self.ly += 1;
+            }
+            (Left, 0, _) => {
+                self.go_to_new_grid(self.gx - 1, self.gy);
+                self.gx -= 1;
+                self.lx = LAST_ELEM;
+            }
+            (Left, _, _) => {
+                self.lx -= 1;
+            }
+            (Right, LAST_ELEM, _) => {
+                self.go_to_new_grid(self.gx + 1, self.gy);
+                self.gx += 1;
+                self.lx = 0;
+            }
+            (Right, _, _) => {
+                self.lx += 1;
+            }
+        }
+    }
+
+    fn count_black_tiles(&mut self) -> usize {
+        let mut n = 0;
+
+        // update current grid in HashMap
+        self.map
+            .insert((self.gx, self.gy), Rc::new(self.grid.clone()));
+
+        // count tiles
+        for (_, rc_grid) in self.map.iter() {
+            n += rc_grid.iter().filter(|&&x| x == Black).count();
+        }
+
+        n
     }
 }
 
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-enum Dir {
-    N,
-    E,
-    S,
-    W,
+impl<T> Grid<T>
+where
+    T: Default + Clone,
+{
+    fn new(h: usize, w: usize) -> Self {
+        Self {
+            h,
+            w,
+            inner: vec![T::default(); h * w],
+        }
+    }
+
+    fn iter(&self) -> std::slice::Iter<T> {
+        self.inner.iter()
+    }
 }
 
-impl Dir {
-    fn rev(&self) -> Self {
-        match self {
-            N => S,
-            S => N,
-            E => W,
-            W => E,
-        }
+impl<T> Index<(usize, usize)> for Grid<T> {
+    type Output = T;
+
+    fn index(&self, (y, x): (usize, usize)) -> &Self::Output {
+        &self.inner[y * self.w + x]
+    }
+}
+
+impl<T> IndexMut<(usize, usize)> for Grid<T> {
+    fn index_mut(&mut self, (y, x): (usize, usize)) -> &mut Self::Output {
+        &mut self.inner[y * self.w + x]
+    }
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        White
     }
 }
 
 impl From<i8> for Dir {
     fn from(a: i8) -> Self {
-        match a % 4 {
-            0 => N,
-            1 => E,
-            2 => S,
-            3 => W,
-            _ => N,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-enum Quad {
-    NW,
-    NE,
-    SW,
-    SE,
-}
-
-impl From<u8> for Quad {
-    fn from(a: u8) -> Self {
+        let a = a % 4;
         match a {
-            0 => NW,
-            1 => NE,
-            2 => SW,
-            3 => SE,
-            _ => panic!("can't convert number bigger 4 to Quad"),
+            0 => Up,
+            1 => Right,
+            2 => Down,
+            3 => Left,
+            _ => Up,
         }
     }
 }
 
-impl Into<usize> for Quad {
-    fn into(self) -> usize {
-        match self {
-            NW => 0,
-            NE => 1,
-            SW => 2,
-            SE => 3,
+impl From<Dir> for i8 {
+    fn from(a: Dir) -> Self {
+        match a {
+            Up => 0,
+            Right => 1,
+            Down => 2,
+            Left => 3,
         }
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
-enum Color {
-    Black,
-    White,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Color {
-    fn flip(&mut self) {
-        match self {
-            Black => *self = White,
-            White => *self = Black,
-        }
-    }
-}
-
-type Link = Option<Rc<RefCell<Node>>>;
-type WeakLink = Option<Weak<RefCell<Node>>>;
-
-struct Node {
-    level: u32,
-    tile: Option<Color>,
-    quad: Option<Quad>,
-    parent: WeakLink,
-    children: Vec<Link>,
-}
-
-struct Ant {
-    root: Rc<RefCell<Node>>,
-    node: Rc<RefCell<Node>>,
-    dir: Dir,
-}
-
-impl Ant {
-    fn new() -> Self {
-        let root = Rc::new(RefCell::new(Node {
-            level: 0,
-            tile: Some(White),
-            quad: None,
-            parent: None,
-            children: vec![None; 4],
-        }));
-
-        let node = root.clone();
-
-        Ant { root, node, dir: N }
+    #[test]
+    fn one_turn() {
+        let mut ant = Ant::new();
+        ant.do_one_turn();
+        assert_eq!(ant.count_black_tiles(), 1);
     }
 
-    fn try_move(quad: Option<Quad>, dir: Dir) -> Option<Quad> {
-        match quad {
-            None => None,
-            Some(quad) => match (quad, dir) {
-                (NW, N) => None,
-                (NW, E) => Some(NE),
-                (NW, S) => Some(SW),
-                (NW, W) => None,
-
-                (NE, N) => None,
-                (NE, E) => None,
-                (NE, S) => Some(SE),
-                (NE, W) => Some(NW),
-
-                (SW, N) => Some(NW),
-                (SW, E) => Some(SE),
-                (SW, S) => None,
-                (SW, W) => None,
-
-                (SE, N) => Some(NE),
-                (SE, E) => None,
-                (SE, S) => None,
-                (SE, W) => Some(SW),
-            },
+    #[test]
+    fn four_turns() {
+        let mut ant = Ant::new();
+        for _ in 0..4 {
+            ant.do_one_turn();
         }
+        assert_eq!(ant.count_black_tiles(), 4);
     }
 
-    fn create_parent(&mut self) {
-        // if parent already exists, cancel
-        if { self.node.borrow().parent.is_some() } {
-            return;
+    #[test]
+    fn five_turns() {
+        let mut ant = Ant::new();
+        for _ in 0..5 {
+            ant.do_one_turn();
         }
-
-        // choose how to expand, TODO: improve
-        let expand_as = match self.dir {
-            N => SW,
-            E => NW,
-            S => NE,
-            W => SE,
-        };
-
-        // new parent node
-        let parent = Rc::new(RefCell::new(Node {
-            level: { self.node.borrow().level + 1 },
-            tile: None,
-            quad: None,
-            parent: None,
-            children: vec![None; 4],
-        }));
-
-        // linking the parent and the node
-        {
-            let mut node = self.node.borrow_mut();
-            node.parent = Some(Rc::downgrade(&parent));
-            node.quad = Some(expand_as);
-        }
-        {
-            let node = self.node.clone();
-            parent.borrow_mut().children[expand_as as usize] = Some(node);
-        }
-
-        // set created parent node as Quadtree root
-        self.root = parent;
+        assert_eq!(ant.count_black_tiles(), 3);
     }
 
-    fn create_child(&mut self, quad: Quad) {
-        // if child already exists, cancel
-        if { self.node.borrow().children[quad as usize].is_some() } {
-            return;
+    #[test]
+    fn a_lot_of_turns() {
+        let mut ant = Ant::new();
+        for _ in 0..10000 {
+            ant.do_one_turn();
         }
-
-        // new child node
-        let level = { self.node.borrow().level - 1 };
-        let child = Rc::new(RefCell::new(Node {
-            level,
-            tile: if level == 0 { Some(White) } else { None },
-            quad: Some(quad),
-            parent: Some(Rc::downgrade(&self.node)),
-            children: vec![None; 4],
-        }));
-
-        // linking the parent and the node
-        {
-            let mut node = self.node.borrow_mut();
-            node.children[quad as usize] = Some(child);
-        }
-    }
-
-    fn level_up(node: &mut Rc<RefCell<Node>>) {
-        let parent = node.borrow().parent.clone();
-        match parent {
-            None => {}
-            Some(i) => *node = i.upgrade().unwrap(),
-        }
-    }
-
-    fn level_down(node: &mut Rc<RefCell<Node>>, quad: Quad) {
-        let child = node.borrow().children[quad as usize].clone();
-        match child {
-            None => {}
-            Some(i) => *node = i,
-        }
-    }
-
-    fn go(&mut self) {
-        if { self.node.borrow().level != 0 } {
-            panic!("Ant tries to go and is not at level 0");
-        }
-
-        let mut quad_stack: Vec<Quad> = Vec::new();
-
-        let mut dir = self.dir;
-        let mut quad = self.node.borrow().quad;
-        let mut can_move = Ant::try_move(quad, dir).is_some();
-
-        // as long ant hits boundary, go up a level
-        while !can_move {
-            // if no parent, expand tree into bigger quad
-            self.create_parent();
-
-            // add movement history to stack
-            quad_stack.push(self.node.borrow().quad.unwrap());
-
-            // go up a level
-            Ant::level_up(&mut self.node);
-
-            // check whether move is now possible
-            dir = self.dir;
-            quad = self.node.borrow().quad;
-            can_move = Ant::try_move(quad, dir).is_some();
-        }
-
-        // go up again
-        quad_stack.push(self.node.borrow().quad.unwrap());
-
-        Ant::level_up(&mut self.node);
-
-        // after going up, go down, mirrored to crossed boundary
-        dir = dir.rev();
-        quad_stack = quad_stack
-            .iter()
-            .map(|&x| Ant::try_move(Some(x), dir).unwrap())
-            .collect();
-
-        while let Some(quad) = quad_stack.pop() {
-            // if child node does not exist, create it
-            self.create_child(quad);
-
-            // go down
-            Ant::level_down(&mut self.node, quad);
-        }
-
-        // turn
-        {
-            let node = self.node.borrow();
-            if let Some(x) = node.tile {
-                match x {
-                    White => self.dir = Dir::from(self.dir as i8 + 1),
-                    Black => self.dir = Dir::from(self.dir as i8 - 1),
-                }
-            }
-        }
-
-        // flip color
-        {
-            let node = self.node.borrow_mut();
-            if let Some(mut x) = node.tile {
-                x.flip();
-            }
-        }
-    }
-
-    fn count_black(&mut self) -> u64 {
-        let mut n = 0u64;
-        let mut node = self.root.clone();
-
-        // go to left-most leaf
-        while { node.borrow().level > 0 } {}
-
-        // visit next sibling, when last sibling, go up another level and visit next sibling there
-
-        // TODO
-        unimplemented!();
-    }
-}
-
-impl Drop for Ant {
-    fn drop(&mut self) {
-        // TODO?
     }
 }
