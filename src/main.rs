@@ -138,11 +138,11 @@ impl Ant {
         // turn and flip color
         match tile {
             White => {
-                self.dir = Dir::from(self.dir as i8 + 1);
+                self.dir.turn_cw();
                 *tile = Black;
             }
             Black => {
-                self.dir = Dir::from(self.dir as i8 - 1);
+                self.dir.turn_ccw();
                 *tile = White;
             }
         }
@@ -237,26 +237,31 @@ impl Default for Color {
     }
 }
 
-impl From<i8> for Dir {
-    fn from(a: i8) -> Self {
-        let a = a % 4;
-        match a {
-            0 => Up,
-            1 => Right,
-            2 => Down,
-            3 => Left,
-            _ => Up,
+impl Dir {
+    fn turn_cw(&mut self) {
+        *self = match self {
+            Up => Right,
+            Right => Down,
+            Down => Left,
+            Left => Up,
         }
     }
-}
 
-impl From<Dir> for i8 {
-    fn from(a: Dir) -> Self {
-        match a {
-            Up => 0,
-            Right => 1,
-            Down => 2,
-            Left => 3,
+    fn turn_ccw(&mut self) {
+        *self = match self {
+            Up => Left,
+            Left => Down,
+            Down => Right,
+            Right => Up,
+        }
+    }
+
+    fn _turn_around(&mut self) {
+        *self = match self {
+            Up => Down,
+            Down => Up,
+            Right => Left,
+            Left => Right,
         }
     }
 }
